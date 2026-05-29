@@ -1,7 +1,7 @@
 #!/bin/bash
 #╔══════════════════════════════════════════════════════════════════════════════╗
-#║                     SCRIPT DE GESTIÓN PROXMOX v4.3                         ║
-#║                  Administración masiva de usuarios, VMs y CTs              ║
+#║                     SCRIPT DE GESTIÓN PROXMOX v7.0                           ║
+#║                  Administración masiva de usuarios, VMs y CTs                ║
 #╚══════════════════════════════════════════════════════════════════════════════╝
 
 # AUTOR: Esther CN
