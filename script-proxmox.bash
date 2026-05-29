@@ -1,12 +1,21 @@
 #!/bin/bash
 #╔══════════════════════════════════════════════════════════════════════════════╗
-#║                     SCRIPT DE GESTIÓN PROXMOX v7.0                           ║
+#║                     SCRIPT DE GESTIÓN PROXMOX v7.5                           ║
 #║                  Administración masiva de usuarios, VMs y CTs                ║
+#║                                                                              ║
+#║  Autor: Esther CN                                                            ║
+#║  Departamento: Electricidad                                                  ║
+#║  Año: 2026                                                                   ║
 #╚══════════════════════════════════════════════════════════════════════════════╝
-
-# AUTOR: Esther CN
-# AÑO: 2026
-# VERSIÓN: 7.0
+#
+# Descripción: Herramienta interactiva para administrar de forma masiva
+#              usuarios, máquinas virtuales, contenedores y pools en Proxmox VE.
+#              Incluye validación avanzada de archivos, notificaciones
+#              por correo electrónico, menús optimizados y asistente de IPs
+#              con exportación de resultados.
+#
+# Requisitos: Ejecutar como root en un servidor Proxmox VE con jq instalado.
+#
 
 #---------------------------------------------------------
 # CONFIGURACIÓN GLOBAL
@@ -15,7 +24,7 @@
 API_TIMEOUT=30
 MAX_RETRIES=3
 LOG_FILE="$HOME/registro.log"
-EMAIL_NOTIFICACION="ecrunin612@g.educaand.es"
+EMAIL_NOTIFICACION="admin@example.edu"
 TEMP_DIR="/tmp/proxmox_gestion_$$"
 
 #---------------------------------------------------------
@@ -36,7 +45,7 @@ function log_warning { log_message "WARNING" "$1"; }
 function log_debug { log_message "DEBUG" "$1"; }
 
 #---------------------------------------------------------
-# FUNCIONES DE CORREO MEJORADO
+# FUNCIONES DE CORREO
 #---------------------------------------------------------
 
 function EnviarNotificacion {
@@ -44,7 +53,7 @@ function EnviarNotificacion {
         return 0
     fi
     
-    whiptail --title "NOTIFICACION" --yesno "Desea enviar un resumen por correo a:\n$EMAIL_NOTIFICACION ?" 10 55 --yes-button "Si, enviar" --no-button "No, omitir"
+    whiptail --title "NOTIFICACION" --yesno "Desea enviar un resumen por correo a:\n$EMAIL_NOTIFICACION ?" 10 55
     if [ $? -ne 0 ]; then
         log_info "Usuario omitio el envio de notificacion por correo"
         return 0
@@ -69,19 +78,15 @@ function EnviarNotificacion {
 %s
 
 ══════════════════════════════════════════════════════════════
-  Para mas detalles, revise el registro en el servidor:
-  %s
-
-  Script: PROXMOX Gestion Masiva v4.3
-  Este mensaje fue generado automaticamente.
+  Script: PROXMOX Gestion Masiva v7.5
+  Autor: Esther CN - Dpto. Electricidad
 ══════════════════════════════════════════════════════════════
-' "$fecha" "$(hostname)" "$USER" "$asunto" "$mensaje" "$LOG_FILE"
+' "$fecha" "$(hostname)" "$USER" "$asunto" "$mensaje"
     
     echo "$correo" | mail -s "[Proxmox] $asunto" "$EMAIL_NOTIFICACION" 2>/dev/null
     
     if [ $? -eq 0 ]; then
         log_info "Notificacion enviada a $EMAIL_NOTIFICACION"
-        whiptail --title "Correo enviado" --msgbox "Resumen enviado correctamente a:\n$EMAIL_NOTIFICACION" 8 55
     else
         log_warning "No se pudo enviar notificacion a $EMAIL_NOTIFICACION"
     fi
@@ -92,7 +97,7 @@ function EnviarNotificacion {
 #---------------------------------------------------------
 
 function Limpieza {
-    rm -f desbloqueatemp opcion numestemp poolstemp eliminatemp1 grouptemp bloqueatemp apagatemp progreso_temp error_temp miembros_temp ips_temp csv_temp creados_temp errores_temp &>/dev/null
+    rm -f desbloqueatemp opcion numestemp poolstemp eliminatemp1 grouptemp bloqueatemp apagatemp progreso_temp error_temp miembros_temp ips_temp csv_temp creados_temp errores_temp export_temp correo_temp &>/dev/null
     rm -rf "$TEMP_DIR" &>/dev/null
     mkdir -p "$TEMP_DIR"
 }
@@ -141,6 +146,24 @@ function SePuedeLeer {
         MensajeBox "Imposible crear ficheros temporales.\nVerifica permisos en $(pwd)" "ERROR"
         exit 4
     fi
+}
+
+#---------------------------------------------------------
+# PANTALLA DE ESPERA (TRANSICIONES SUAVES SIN SALIR DE WHIPTAIL)
+#---------------------------------------------------------
+
+function PantallaEspera {
+    local mensaje="$1"
+    local segundos="${2:-1}"
+    
+    {
+        for (( i=0; i<=100; i+=10 )); do
+            echo "$i"
+            echo "$mensaje"
+            sleep 0.1
+        done
+        echo "100"
+    } | whiptail --title "PROXMOX GESTION" --gauge "Preparando..." 8 60 0
 }
 
 #---------------------------------------------------------
@@ -266,7 +289,7 @@ function NavegadorFiles {
         ruta=$(ls -lhp "$1" | awk -F ' ' ' { print $9 " " $5 } ')
     fi
 
-    rutaselect=$(whiptail --title "NAVEGADOR DE ARCHIVOS" --menu "Selecciona el fichero:" 20 68 15 \
+    rutaselect=$(whiptail --title "NAVEGADOR DE ARCHIVOS" --menu "Selecciona el fichero:" 22 75 15 \
         --cancel-button "Volver" --ok-button "Seleccionar" \
         "../" "Subir al directorio superior" $ruta 3>&1 1>&2 2>&3)
 
@@ -281,6 +304,50 @@ function NavegadorFiles {
             fichero=$(readlink -m "$target")
             unset rutaselect
             return 0
+        fi
+    fi
+}
+
+#---------------------------------------------------------
+# NAVEGADOR DE DIRECTORIOS (SOLO CARPETAS)
+#---------------------------------------------------------
+
+function NavegadorDirectorios {
+    unset directorio_seleccionado
+    
+    if [ -z "$1" ]; then
+        ruta=$(ls -lhp "$(pwd)" | grep "^d" | awk -F ' ' ' { print $9 " " $5 } ')
+    else
+        ruta=$(ls -lhp "$1" | grep "^d" | awk -F ' ' ' { print $9 " " $5 } ')
+    fi
+
+    local seleccion=$(whiptail --title "SELECCIONAR DIRECTORIO" --menu "Selecciona el directorio de destino:" 22 75 15 \
+        --cancel-button "Volver" --ok-button "Seleccionar" \
+        "../" "Subir al directorio superior" \
+        "." "Seleccionar este directorio" $ruta 3>&1 1>&2 2>&3)
+
+    Salida=$?
+    if [ $Salida -eq 1 ]; then
+        return 1
+    elif [ $Salida -eq 0 ]; then
+        if [ "$seleccion" = "." ]; then
+            if [ -z "$1" ]; then
+                directorio_seleccionado="$(pwd)"
+            else
+                directorio_seleccionado="$1"
+            fi
+            return 0
+        elif [ "$seleccion" = "../" ]; then
+            if [ -z "$1" ]; then
+                NavegadorDirectorios "$(dirname "$(pwd)")"
+            else
+                NavegadorDirectorios "$(dirname "$1")"
+            fi
+        else
+            local target="${1:+$1/}$seleccion"
+            if [[ -d "$target" ]]; then
+                NavegadorDirectorios "$target"
+            fi
         fi
     fi
 }
@@ -303,14 +370,14 @@ function TomarFichero {
                     ficheroUsers=$fichero
                     break
                 else
-                    whiptail --title "ERROR DE VALIDACION" --yesno "El archivo contiene errores.\n\nDesea intentarlo con otro archivo?" 10 55 --yes-button "Si, elegir otro" --no-button "Volver"
+                    whiptail --title "ERROR DE VALIDACION" --yesno "El archivo contiene errores.\n\nDesea intentarlo con otro archivo?" 10 55
                     if [ $? -ne 0 ]; then
                         unset fichero
                         return 1
                     fi
                 fi
             else
-                whiptail --title "ERROR DE FORMATO" --yesno "Cabecera no compatible.\nDebe contener: NOMBRE, APELLIDOS, CORREO\n\nDesea reintentar?" 14 60 --yes-button "Reintentar" --no-button "Volver"
+                whiptail --title "ERROR DE FORMATO" --yesno "Cabecera no compatible.\nDebe contener: NOMBRE, APELLIDOS, CORREO\n\nDesea reintentar?" 14 60
                 if [ $? -ne 0 ]; then
                     unset fichero
                     return 1
@@ -322,14 +389,14 @@ function TomarFichero {
                     ficheroMaquinas=$fichero
                     break
                 else
-                    whiptail --title "ERROR DE VALIDACION" --yesno "El archivo contiene errores.\n\nDesea intentarlo con otro archivo?" 10 55 --yes-button "Si, elegir otro" --no-button "Volver"
+                    whiptail --title "ERROR DE VALIDACION" --yesno "El archivo contiene errores.\n\nDesea intentarlo con otro archivo?" 10 55
                     if [ $? -ne 0 ]; then
                         unset fichero
                         return 1
                     fi
                 fi
             else
-                whiptail --title "ERROR DE FORMATO" --yesno "Cabecera no compatible.\nDebe contener: PLANTILLA, POOL\n\nDesea reintentar?" 14 60 --yes-button "Reintentar" --no-button "Volver"
+                whiptail --title "ERROR DE FORMATO" --yesno "Cabecera no compatible.\nDebe contener: PLANTILLA, POOL\n\nDesea reintentar?" 14 60
                 if [ $? -ne 0 ]; then
                     unset fichero
                     return 1
@@ -357,7 +424,7 @@ function PedirNodo {
         fi
         
         if ! CheckAPI; then
-            whiptail --title "ERROR DE CONEXION" --yesno "No se puede conectar con la API.\n\nDesea reintentar?" 10 55 --yes-button "Reintentar" --no-button "Volver"
+            whiptail --title "ERROR DE CONEXION" --yesno "No se puede conectar con la API.\n\nDesea reintentar?" 10 55
             if [ $? -ne 0 ]; then
                 return 1
             fi
@@ -370,7 +437,7 @@ function PedirNodo {
             return 0
         else
             nodos_disponibles=$(pvesh get /nodes --output-format=json 2>/dev/null | jq -r '.[].node' | tr '\n' ' ')
-            whiptail --title "ERROR DE NODO" --yesno "Nodo '$nodo' no encontrado.\nNodos disponibles: $nodos_disponibles\n\nDesea reintentar?" 14 55 --yes-button "Reintentar" --no-button "Volver"
+            whiptail --title "ERROR DE NODO" --yesno "Nodo '$nodo' no encontrado.\nNodos disponibles: $nodos_disponibles\n\nDesea reintentar?" 14 55
             if [ $? -ne 0 ]; then
                 return 1
             fi
@@ -468,6 +535,8 @@ function CrearUsuarios {
         MensajeBox "Error de conexion con la API de Proxmox." "ERROR"
         return
     fi
+
+    PantallaEspera "Preparando creacion de usuarios..." 1
 
     MensajeBox "Selecciona el fichero con los usuarios" "CREAR USUARIOS"
     if ! TomarFichero "usuarios"; then
@@ -604,7 +673,7 @@ function CrearUsuarios {
     
     EnviarNotificacion "Usuarios creados - $grupo" "$correo_msg"
     
-    whiptail --title "PROXMOX" --yesno "$mensaje" 22 75 --yes-button "Volver al menu" --no-button "Salir"
+    whiptail --title "PROXMOX" --yesno "$mensaje" 22 75
     if [ $? -ne 0 ]; then
         clear
         exit 0
@@ -616,6 +685,8 @@ function BorrarUsuarios {
         MensajeBox "Error de conexion con la API." "ERROR"
         return
     fi
+
+    PantallaEspera "Preparando eliminacion de usuarios..." 1
 
     MensajeBox "Selecciona el fichero con los usuarios a eliminar" "ELIMINAR USUARIOS"
     if ! TomarFichero "usuarios"; then
@@ -700,13 +771,16 @@ function BorrarUsuarios {
     fi
     
     if [ "$grupo_vacio" = true ]; then
-        whiptail --title "GRUPO VACIO" --yesno "El grupo '$grupo' ha quedado vacio.\n\nDesea eliminar tambien el grupo?" 10 55 --yes-button "Si, eliminar grupo" --no-button "No, conservar grupo"
+        whiptail --title "GRUPO VACIO" --yesno "El grupo '$grupo' ha quedado vacio.\n\nDesea eliminar tambien el grupo?" 12 55
         if [ $? -eq 0 ]; then
-            pveum groupdel $grupo 2>/dev/null
-            if [ $? -eq 0 ]; then
+            if pveum groupdel $grupo 2>/dev/null; then
                 log_success "Grupo eliminado: $grupo"
                 eliminar_grupo="Si"
+            else
+                log_error "No se pudo eliminar el grupo '$grupo'"
             fi
+        else
+            log_info "Usuario decidio conservar el grupo '$grupo' (vacio)"
         fi
     fi
     
@@ -759,7 +833,7 @@ function BorrarUsuarios {
     
     EnviarNotificacion "Usuarios eliminados - $grupo" "$correo_msg"
     
-    whiptail --title "PROXMOX" --yesno "$mensaje" 22 75 --yes-button "Volver al menu" --no-button "Salir"
+    whiptail --title "PROXMOX" --yesno "$mensaje" 22 75
     if [ $? -ne 0 ]; then
         clear
         exit 0
@@ -829,6 +903,8 @@ function CrearRecursosIndividuales {
         MensajeBox "Error de conexion con la API" "ERROR"
         return
     fi
+
+    PantallaEspera "Preparando creacion de recursos..." 1
 
     MensajeBox "Selecciona el fichero con los usuarios" "CREAR RECURSOS"
     if ! TomarFichero "usuarios"; then return; fi
@@ -1017,7 +1093,7 @@ function CrearRecursosIndividuales {
     
     EnviarNotificacion "Recursos creados - $nodo" "$correo_msg"
     
-    whiptail --title "PROXMOX" --yesno "$mensaje" 22 75 --yes-button "Volver al menu" --no-button "Salir"
+    whiptail --title "PROXMOX" --yesno "$mensaje" 22 75
     if [ $? -ne 0 ]; then
         clear
         exit 0
@@ -1033,6 +1109,8 @@ function CrearRecursosCompartidos {
         MensajeBox "Error de conexion con la API" "ERROR"
         return
     fi
+
+    PantallaEspera "Preparando creacion de recursos compartidos..." 1
 
     declare -a ficheros=()
     while true; do
@@ -1255,7 +1333,7 @@ function CrearRecursosCompartidos {
     
     EnviarNotificacion "Recursos compartidos - $nodo" "$correo_msg"
     
-    whiptail --title "PROXMOX" --yesno "$mensaje" 22 75 --yes-button "Volver al menu" --no-button "Salir"
+    whiptail --title "PROXMOX" --yesno "$mensaje" 22 75
     if [ $? -ne 0 ]; then
         clear
         exit 0
@@ -1263,7 +1341,7 @@ function CrearRecursosCompartidos {
 }
 
 #---------------------------------------------------------
-# GESTION DE POOLS
+# FUNCIONES PARA GESTION DE POOLS
 #---------------------------------------------------------
 
 function get_pools {
@@ -1284,6 +1362,365 @@ function get_ct_name {
     local ctid=$1
     pct config $ctid 2>/dev/null | grep "^hostname:" | awk '{print $2}'
 }
+
+#---------------------------------------------------------
+# FUNCIONES DE EXPORTACIÓN Y CORREO
+#---------------------------------------------------------
+
+function ExportarArchivo {
+    local archivo="$1"
+    local pool="$2"
+    local total_ips=0
+    
+    if [ -f "$TEMP_DIR/ips_resultado.txt" ]; then
+        total_ips=$(wc -l < "$TEMP_DIR/ips_resultado.txt")
+    fi
+    
+    {
+        echo "========================================="
+        echo "  DIRECCIONES IP DEL POOL: $pool"
+        echo "========================================="
+        echo "TIPO;ID;NOMBRE;DIRECCION IP"
+        echo "========================================="
+        
+        if [ -f "$TEMP_DIR/ips_resultado.txt" ]; then
+            while IFS=";" read -r tipo vmid name ip; do
+                echo "$tipo;$vmid;$name;$ip"
+            done < "$TEMP_DIR/ips_resultado.txt"
+        fi
+        
+        echo "========================================="
+        echo "Pool: $pool"
+        echo "Fecha de exportacion: $(date '+%d-%m-%Y %H:%M:%S')"
+        echo "Total de instancias: $total_ips"
+        echo "Servidor: $(hostname)"
+        echo "Script: PROXMOX Gestion v7.5 - Esther CN"
+        echo "========================================="
+    } > "$archivo"
+    
+    log_success "Resultados exportados a: $archivo"
+    whiptail --title "EXPORTACION COMPLETADA" --msgbox "Resultados exportados correctamente a:\n\n$archivo" 10 65
+}
+
+function EnviarIPsPorEmail {
+    local pool="$1"
+    
+    # Verificar si hay correo configurado
+    if [ -z "$EMAIL_NOTIFICACION" ]; then
+        whiptail --title "ERROR" --msgbox "No hay un correo de notificacion configurado.\n\nEdite la variable EMAIL_NOTIFICACION al inicio del script." 10 60
+        return
+    fi
+    
+    # Preguntar destinatario (por defecto el configurado)
+    local destinatario=$(whiptail --title "ENVIAR POR CORREO" --inputbox "Direccion de correo electronico:" 10 55 "$EMAIL_NOTIFICACION" 3>&1 1>&2 2>&3)
+    
+    if [ $? -ne 0 ] || [ -z "$destinatario" ]; then
+        return
+    fi
+    
+    # Construir el contenido del correo
+    local fecha=$(date '+%d-%m-%Y %H:%M:%S')
+    local total_ips=0
+    
+    if [ -f "$TEMP_DIR/ips_resultado.txt" ]; then
+        total_ips=$(wc -l < "$TEMP_DIR/ips_resultado.txt")
+    fi
+    
+    local correo_temp="$TEMP_DIR/correo_ips.txt"
+    
+    {
+        echo "══════════════════════════════════════════════════════════════"
+        echo "              DIRECCIONES IP DEL POOL: $pool"
+        echo "══════════════════════════════════════════════════════════════"
+        echo ""
+        echo "  TIPO  ;  ID  ;  NOMBRE            ;  DIRECCION IP"
+        echo "  ─────────────────────────────────────────────────────────"
+        echo ""
+        
+        if [ -f "$TEMP_DIR/ips_resultado.txt" ]; then
+            while IFS=";" read -r tipo vmid name ip; do
+                if [ "$tipo" = "VM" ]; then
+                    printf "  VM    ; %4s ; %-18s ; %s\n" "$vmid" "$name" "$ip"
+                else
+                    printf "  LXC   ; %4s ; %-18s ; %s\n" "$vmid" "$name" "$ip"
+                fi
+            done < "$TEMP_DIR/ips_resultado.txt"
+        fi
+        
+        echo ""
+        echo "══════════════════════════════════════════════════════════════"
+        echo "  Pool: $pool"
+        echo "  Fecha de exportacion: $fecha"
+        echo "  Total de instancias: $total_ips"
+        echo "  Servidor: $(hostname)"
+        echo "  Script: PROXMOX Gestion v7.5 - Esther CN"
+        echo "══════════════════════════════════════════════════════════════"
+    } > "$correo_temp"
+    
+    # Enviar correo
+    cat "$correo_temp" | mail -s "[Proxmox] IPs del pool: $pool" "$destinatario" 2>/dev/null
+    
+    if [ $? -eq 0 ]; then
+        log_success "Correo con IPs enviado a: $destinatario"
+        whiptail --title "CORREO ENVIADO" --msgbox "Resultados enviados correctamente a:\n\n$destinatario" 10 55
+    else
+        log_error "No se pudo enviar el correo a: $destinatario"
+        whiptail --title "ERROR" --msgbox "No se pudo enviar el correo.\n\nVerifique que mailx este instalado y configurado:\n  apt-get install mailx" 12 60
+    fi
+    
+    rm -f "$correo_temp"
+}
+
+function MenuExportacion {
+    local pool="$1"
+    local archivo_export=""
+    
+    while true; do
+        local opcion_exp=$(whiptail --title "EXPORTAR RESULTADOS" --menu "Seleccione el destino de exportacion:" 18 65 7 \
+            "1" "Exportar a directorio home (~/)" \
+            "2" "Exportar a ubicacion personalizada" \
+            "3" "Exportar a directorio actual" \
+            "4" "Enviar por correo electronico" \
+            "5" "No exportar - Solo mostrar" \
+            "6" "Volver al menu principal" 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ] || [ "$opcion_exp" = "6" ]; then
+            return
+        fi
+        
+        case $opcion_exp in
+            1)
+                archivo_export="$HOME/ips_${pool}_$(date '+%Y%m%d_%H%M%S').txt"
+                ExportarArchivo "$archivo_export" "$pool"
+                return
+                ;;
+            2)
+                PantallaEspera "Abriendo navegador de directorios..." 1
+                if NavegadorDirectorios; then
+                    archivo_export="$directorio_seleccionado/ips_${pool}_$(date '+%Y%m%d_%H%M%S').txt"
+                    ExportarArchivo "$archivo_export" "$pool"
+                fi
+                return
+                ;;
+            3)
+                archivo_export="$(pwd)/ips_${pool}_$(date '+%Y%m%d_%H%M%S').txt"
+                ExportarArchivo "$archivo_export" "$pool"
+                return
+                ;;
+            4)
+                EnviarIPsPorEmail "$pool"
+                return
+                ;;
+            5)
+                whiptail --title "INFORMACION" --msgbox "Resultados mostrados en pantalla.\nNo se ha exportado ningun archivo." 8 55
+                return
+                ;;
+        esac
+    done
+}
+
+#---------------------------------------------------------
+# ASISTENTE DE IPs
+#---------------------------------------------------------
+
+function AsistenteIPs {
+    if ! CheckAPI; then
+        MensajeBox "Error de conexion con la API" "ERROR"
+        return
+    fi
+
+    # Bienvenida
+    whiptail --title "ASISTENTE DE DIRECCIONES IP" --msgbox "Bienvenido al Asistente de Direcciones IP\n\nEste asistente le permite:\n\n  - Seleccionar un pool\n  - Encender automaticamente los recursos apagados\n  - Esperar 30 segundos para que obtengan IP\n  - Mostrar las direcciones IP de cada recurso\n  - Exportar los resultados a un archivo\n  - Enviar los resultados por correo electronico\n\nPulse OK para continuar" 20 65
+
+    while true; do
+        # Seleccionar pool
+        local pools=$(get_pools)
+        
+        if [ -z "$pools" ]; then
+            whiptail --title "Error" --msgbox "No se encontraron pools en el sistema." 8 50
+            return
+        fi
+        
+        local pools_array=($pools)
+        local menu_options=()
+        for pool in "${pools_array[@]}"; do
+            local members=$(get_pool_members "$pool")
+            local member_count=0
+            if [ -n "$members" ]; then
+                member_count=$(echo "$members" | grep -c .)
+            fi
+            menu_options+=("$pool" "(${member_count} miembros)")
+        done
+        
+        local elpool=$(whiptail --title "ASISTENTE IPs - Seleccionar Pool" --menu "Selecciona el pool para obtener sus IPs:" 18 65 8 --cancel-button "Salir" "${menu_options[@]}" 3>&1 1>&2 2>&3)
+        
+        if [ $? -ne 0 ]; then
+            return
+        fi
+
+        # Encender apagados
+        local members=$(get_pool_members "$elpool")
+        local encendidos=0
+        local ya_encendidos=0
+        
+        if [ -n "$members" ]; then
+            {
+                echo "0"
+                echo "Verificando estado de los recursos..."
+                sleep 1
+                
+                local total=0
+                local current=0
+                local temp_array=()
+                while IFS=':' read vmid type; do
+                    temp_array+=("$vmid:$type")
+                    total=$((total + 1))
+                done <<< "$members"
+                
+                for member in "${temp_array[@]}"; do
+                    IFS=':' read vmid type <<< "$member"
+                    current=$((current + 1))
+                    percent=$((current * 100 / total))
+                    
+                    if [ "$type" = "qemu" ]; then
+                        local status=$(qm status $vmid 2>/dev/null | awk '{print $2}')
+                        if [ "$status" = "stopped" ]; then
+                            echo "$percent"
+                            echo "Encendiendo VM $vmid..."
+                            qm start $vmid 2>/dev/null &
+                            encendidos=$((encendidos + 1))
+                        else
+                            echo "$percent"
+                            echo "VM $vmid ya esta encendida..."
+                            ya_encendidos=$((ya_encendidos + 1))
+                        fi
+                    elif [ "$type" = "lxc" ]; then
+                        local status=$(pct status $vmid 2>/dev/null | awk '{print $2}')
+                        if [ "$status" = "stopped" ]; then
+                            echo "$percent"
+                            echo "Encendiendo CT $vmid..."
+                            pct start $vmid 2>/dev/null &
+                            encendidos=$((encendidos + 1))
+                        else
+                            echo "$percent"
+                            echo "CT $vmid ya esta encendido..."
+                            ya_encendidos=$((ya_encendidos + 1))
+                        fi
+                    fi
+                    sleep 0.5
+                done
+                
+                echo "100"
+                echo "Verificacion completada"
+                sleep 1
+            } | whiptail --title "ENCENDIENDO RECURSOS" --gauge "Verificando..." 8 65 0
+        fi
+        
+        whiptail --title "Resumen de encendido" --msgbox "Resultado del encendido:\n\n  Recursos encendidos: $encendidos\n  Ya estaban encendidos: $ya_encendidos\n\nSe procedera a esperar 30 segundos\npara que los recursos obtengan IP." 12 55
+
+        # Esperar 30s
+        {
+            for (( i=30; i>=0; i-- )); do
+                percent=$(( (30 - i) * 100 / 30 ))
+                echo "$percent"
+                echo "Esperando $i segundos..."
+                sleep 1
+            done
+            echo "100"
+            echo "Espera completada"
+            sleep 1
+        } | whiptail --title "ESPERANDO..." --gauge "Los recursos estan obteniendo direcciones IP..." 8 65 0
+
+        # Obtener IPs
+        > "$TEMP_DIR/ips_resultado.txt"
+        
+        {
+            echo "0"
+            echo "Obteniendo miembros del pool..."
+            
+            local temp_array=()
+            while IFS=':' read vmid type; do
+                temp_array+=("$vmid:$type")
+            done <<< "$members"
+            
+            local total=${#temp_array[@]}
+            local current=0
+            
+            for member in "${temp_array[@]}"; do
+                IFS=':' read vmid type <<< "$member"
+                current=$((current + 1))
+                percent=$((current * 100 / total))
+                
+                local name=""
+                local ip=""
+                
+                if [ "$type" = "qemu" ]; then
+                    name=$(get_vm_name "$vmid")
+                    [ -z "$name" ] && name="Sin nombre"
+                    echo "$percent"
+                    echo "Consultando IP de VM $vmid ($name)..."
+                    ip=$(qm agent $vmid network-get-interfaces 2>/dev/null | jq -r '.[] | ."ip-addresses"[] | select(."ip-address-type" == "ipv4" and ."ip-address" != "127.0.0.1") | ."ip-address"' 2>/dev/null | head -n1)
+                    [ -z "$ip" ] && ip="No disponible"
+                    echo "VM;$vmid;$name;$ip" >> "$TEMP_DIR/ips_resultado.txt"
+                elif [ "$type" = "lxc" ]; then
+                    name=$(get_ct_name "$vmid")
+                    [ -z "$name" ] && name="Sin nombre"
+                    echo "$percent"
+                    echo "Consultando IP de CT $vmid ($name)..."
+                    ip=$(pct exec $vmid -- ip -4 addr show 2>/dev/null | grep inet | grep -v 127.0.0.1 | awk '{print $2}' | cut -d "/" -f1 | head -n1)
+                    [ -z "$ip" ] && ip="No disponible"
+                    echo "LXC;$vmid;$name;$ip" >> "$TEMP_DIR/ips_resultado.txt"
+                fi
+                sleep 0.5
+            done
+            
+            echo "100"
+            echo "Obtencion de IPs completada"
+            sleep 1
+        } | whiptail --title "OBTENIENDO DIRECCIONES IP" --gauge "Conectando con el pool..." 8 65 0
+
+        # Mostrar resultados
+        local resultado=""
+        resultado="${resultado}=========================================\n"
+        resultado="${resultado}  DIRECCIONES IP DEL POOL: $elpool\n"
+        resultado="${resultado}=========================================\n"
+        resultado="${resultado}  TIPO  ;  ID  ;  NOMBRE            ;  DIRECCION IP\n"
+        resultado="${resultado}-----------------------------------------\n"
+        
+        local total_ips=0
+        
+        while IFS=";" read -r tipo vmid name ip; do
+            if [ "$tipo" = "VM" ]; then
+                resultado="${resultado}  VM    ; $(printf '%4s' $vmid) ; $(printf '%-18s' "$name") ; $ip\n"
+            else
+                resultado="${resultado}  LXC   ; $(printf '%4s' $vmid) ; $(printf '%-18s' "$name") ; $ip\n"
+            fi
+            total_ips=$((total_ips + 1))
+        done < "$TEMP_DIR/ips_resultado.txt"
+        
+        resultado="${resultado}=========================================\n"
+        resultado="${resultado}  Pool: $elpool\n"
+        resultado="${resultado}  Total de instancias: $total_ips\n"
+        resultado="${resultado}  Servidor: $(hostname)\n"
+        resultado="${resultado}  Fecha: $(date '+%d-%m-%Y %H:%M:%S')\n"
+        resultado="${resultado}=========================================\n"
+        
+        whiptail --title "RESULTADOS - Pool: $elpool" --msgbox "$resultado" 22 75
+
+        # Menú de exportación
+        MenuExportacion "$elpool"
+
+        # ¿Otro pool?
+        whiptail --title "ASISTENTE IPs" --yesno "Desea consultar las IPs de otro pool?" 8 55
+        if [ $? -ne 0 ]; then
+            break
+        fi
+    done
+}
+
+#---------------------------------------------------------
+# GESTION DE POOLS (ELIMINAR)
+#---------------------------------------------------------
 
 function delete_pool {
     local pool=$1
@@ -1324,19 +1761,23 @@ function list_pools {
         info="${info}POOL: ${pool}\n"
         info="${info}-------------------------------------\n"
         
-        members=$(get_pool_members "$pool")
+        local members=$(get_pool_members "$pool")
         
         if [ -z "$members" ]; then
             info="${info}  (vacio - sin miembros)\n"
         else
             while IFS=':' read vmid type; do
-                if [ "$type" == "qemu" ]; then
-                    name=$(get_vm_name "$vmid")
-                    [ -z "$name" ] && name="Sin nombre"
+                local name=""
+                if [ "$type" = "qemu" ]; then
+                    name=$(qm config $vmid 2>/dev/null | grep "^name:" | awk '{print $2}')
+                elif [ "$type" = "lxc" ]; then
+                    name=$(pct config $vmid 2>/dev/null | grep "^hostname:" | awk '{print $2}')
+                fi
+                [ -z "$name" ] && name="Sin nombre"
+                
+                if [ "$type" = "qemu" ]; then
                     info="${info}  [VM] ${vmid} - ${name}\n"
-                elif [ "$type" == "lxc" ]; then
-                    name=$(get_ct_name "$vmid")
-                    [ -z "$name" ] && name="Sin nombre"
+                else
                     info="${info}  [CT] ${vmid} - ${name}\n"
                 fi
             done <<< "$members"
@@ -1452,7 +1893,6 @@ function delete_vms_from_pool {
         whiptail --title "Completado con errores" --msgbox "Eliminacion completada con incidencias.\n\nExitos: $success\nFallos: $failed\n\nRevise el log: $LOG_FILE" 12 60
     fi
     
-    # Correo con formato tabla
     correo_msg=""
     printf -v correo_msg '%sPOOL: %s\nTOTAL ELEMENTOS: %s\n\n' "$correo_msg" "$pool" "$total"
     printf -v correo_msg '%s┌─────────────────────────────────────────────────────┐\n' "$correo_msg"
@@ -1478,20 +1918,22 @@ function delete_vms_from_pool {
 }
 
 function select_pool {
-    local pools=($(get_pools))
+    local pools=$(get_pools)
     
-    if [ ${#pools[@]} -eq 0 ]; then
+    if [ -z "$pools" ]; then
         whiptail --title "Error" --msgbox "No se encontraron pools en el sistema." 10 60
         return 1
     fi
     
+    local pools_array=($pools)
     local menu_options=()
-    for i in "${!pools[@]}"; do
-        member_count=$(get_pool_members "${pools[$i]}" 2>/dev/null | grep -c . 2>/dev/null)
-        if [ -z "$member_count" ]; then
-            member_count=0
+    for pool in "${pools_array[@]}"; do
+        local members=$(get_pool_members "$pool")
+        local member_count=0
+        if [ -n "$members" ]; then
+            member_count=$(echo "$members" | grep -c .)
         fi
-        menu_options+=("${pools[$i]}" "(${member_count} miembros)")
+        menu_options+=("$pool" "(${member_count} miembros)")
     done
     
     local selected_pool=$(whiptail --title "Seleccionar Pool" --menu "Elige el pool que deseas gestionar:" 15 60 5 "${menu_options[@]}" 3>&1 1>&2 2>&3)
@@ -1506,12 +1948,13 @@ function select_pool {
 
 function MenuGestionPools {
     while true; do
-        choice=$(whiptail --title "GESTOR DE POOLS" --menu "Selecciona una opcion:" 15 60 5 \
+        choice=$(whiptail --title "GESTOR DE POOLS" --menu "Selecciona una opcion:" 18 65 6 \
             "1" "Listar todos los pools existentes" \
             "2" "Eliminar VMs/CTs de un pool" \
-            "3" "Volver al menu principal" 3>&1 1>&2 2>&3)
+            "3" "Asistente de direcciones IP" \
+            "4" "Volver al menu principal" 3>&1 1>&2 2>&3)
         
-        if [ $? -ne 0 ] || [ "$choice" = "3" ]; then
+        if [ $? -ne 0 ] || [ "$choice" = "4" ]; then
             return
         fi
         
@@ -1523,6 +1966,7 @@ function MenuGestionPools {
                     delete_vms_from_pool "$selected_pool"
                 fi
                 ;;
+            3) AsistenteIPs ;;
         esac
     done
 }
@@ -1532,13 +1976,16 @@ function MenuGestionPools {
 #---------------------------------------------------------
 
 function MenuPrincipal {
+    # Pantalla de bienvenida
+    whiptail --title "PROXMOX - GESTION MASIVA v7.5" --msgbox "BIENVENIDO AL SISTEMA DE GESTION PROXMOX\n\nAutor: Esther CN\nDepartamento: Electricidad\n\nEste script le permite:\n\n  - Crear y eliminar usuarios masivamente\n  - Crear maquinas virtuales y contenedores\n  - Gestionar pools (listar, eliminar)\n  - Asistente de direcciones IP\n    (encender recursos, obtener IPs, exportar,\n     enviar por correo electronico)\n\nSeleccione una opcion del menu para comenzar." 22 65
+    
     while true; do
-        opcion=$(whiptail --title "PROXMOX - GESTION MASIVA v4.3" --menu "Selecciona una opcion:" 18 65 8 \
+        opcion=$(whiptail --title "PROXMOX - GESTION MASIVA v7.5" --menu "Selecciona una opcion:" 18 65 8 \
         "1" "Crear usuarios desde fichero" \
         "2" "Eliminar usuarios desde fichero" \
         "3" "Crear recursos individuales (VM/CT)" \
         "4" "Crear recursos compartidos (VM/CT)" \
-        "5" "Gestionar pools (listar/eliminar)" \
+        "5" "Gestionar pools (listar/eliminar/IPs)" \
         "6" "Salir" 3>&1 1>&2 2>&3)
         
         if [ $? -ne 0 ]; then
@@ -1547,11 +1994,11 @@ function MenuPrincipal {
         fi
         
         case $opcion in
-            1) CrearUsuarios ;;
-            2) BorrarUsuarios ;;
-            3) CrearRecursosIndividuales ;;
-            4) CrearRecursosCompartidos ;;
-            5) MenuGestionPools ;;
+            1) PantallaEspera "Cargando modulo de usuarios..." 1; CrearUsuarios ;;
+            2) PantallaEspera "Cargando modulo de eliminacion..." 1; BorrarUsuarios ;;
+            3) PantallaEspera "Cargando modulo de recursos..." 1; CrearRecursosIndividuales ;;
+            4) PantallaEspera "Cargando modulo de recursos compartidos..." 1; CrearRecursosCompartidos ;;
+            5) PantallaEspera "Cargando gestor de pools..." 1; MenuGestionPools ;;
             6) clear; exit 0 ;;
         esac
     done
@@ -1564,7 +2011,8 @@ function MenuPrincipal {
 if [ -n "$1" ]; then
     case "$1" in
         -h | -H | --help)
-            echo "PROXMOX Gestion Masiva v4.3"
+            echo "PROXMOX Gestion Masiva v7.5"
+            echo "Autor: Esther CN - Dpto. Electricidad"
             echo "Uso: $0 [opcion]"
             echo "  -h, --help     Ayuda"
             echo "  -l, --log      Ver log"
@@ -1582,7 +2030,7 @@ if [ -n "$1" ]; then
             exit 0
             ;;
         -V | -v | --version)
-            echo "Script PROXMOX v4.3"
+            echo "Script PROXMOX v7.5 - Esther CN - Dpto. Electricidad"
             exit 0
             ;;
         *)
@@ -1621,7 +2069,7 @@ fi
 Limpieza
 
 echo "========================================================" >> "$LOG_FILE"
-echo "INICIO: $(date '+%d-%m-%Y %H:%M:%S')" >> "$LOG_FILE"
+echo "INICIO: $(date '+%d-%m-%Y %H:%M:%S') - v7.5 - Esther CN - Dpto. Electricidad" >> "$LOG_FILE"
 echo "========================================================" >> "$LOG_FILE"
 
 MenuPrincipal
